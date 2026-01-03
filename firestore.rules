@@ -1,0 +1,92 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        // Check if user document exists and has admin role
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
+        // Allow initial admin setup for the first user
+        !exists(/databases/$(database)/documents/users/$(request.auth.uid))
+      );
+    }
+
+    function hasValidMaterialData(data) {
+      let validMaterialStatus = ['yet-to-be-shipped', 'in-transit', 'received', null];
+      return (
+        (!data.keys().hasAny(['requiresMaterial']) || data.requiresMaterial is bool) &&
+        (!data.keys().hasAny(['materialStatus']) || data.materialStatus in validMaterialStatus) &&
+        (!data.keys().hasAny(['materialDescription']) || data.materialDescription is string || data.materialDescription == null) &&
+        (!data.keys().hasAny(['quotedPrice']) || data.quotedPrice is number || data.quotedPrice == null) &&
+        (!data.keys().hasAny(['confirmedPrice']) || data.confirmedPrice is number || data.confirmedPrice == null)
+      );
+    }
+
+    function hasValidWorkConfirmationData(data) {
+      let validWorkConfirmationStatus = ['awaiting', 'confirmed', null];
+      return (
+        (!data.keys().hasAny(['workConfirmationStatus']) || data.workConfirmationStatus in validWorkConfirmationStatus) &&
+        (!data.keys().hasAny(['poNumber']) || data.poNumber is string || data.poNumber == null)
+      );
+    }
+
+    function hasValidTaskData(data) {
+      let validTypes = ['project', 'job'];
+      let validSources = ['call', 'text', 'email', 'in-person'];
+      let validPriorities = ['low', 'medium', 'high', 'urgent'];
+      let validStatuses = ['not-initiated', 'in-progress', 'completed'];
+      
+      return (
+        (!data.keys().hasAny(['title']) || data.title is string) &&
+        (!data.keys().hasAny(['site']) || data.site is string) &&
+        (!data.keys().hasAny(['description']) || data.description is string) &&
+        (!data.keys().hasAny(['notes']) || data.notes is string || data.notes == null) &&
+        (!data.keys().hasAny(['type']) || data.type in validTypes) &&
+        (!data.keys().hasAny(['source']) || data.source in validSources) &&
+        (!data.keys().hasAny(['priority']) || data.priority in validPriorities) &&
+        (!data.keys().hasAny(['status']) || data.status in validStatuses) &&
+        (!data.keys().hasAny(['userId']) || data.userId == request.auth.uid) &&
+        hasValidMaterialData(data) &&
+        hasValidWorkConfirmationData(data)
+      );
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && 
+        request.auth.uid == userId &&
+        request.resource.data.keys().hasAll(['email', 'role', 'createdAt']) &&
+        request.resource.data.email == request.auth.token.email &&
+        (
+          // Allow first user to be admin
+          !exists(/databases/$(database)/documents/users/$(request.auth.uid)) ||
+          request.resource.data.role == 'admin'
+        );
+      allow update: if isOwner(userId) &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['email', 'name']);
+    }
+    
+    // Tasks collection
+    match /tasks/{taskId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && 
+        hasValidTaskData(request.resource.data) && 
+        (isAdmin() || request.resource.data.userId == request.auth.uid);
+      allow update: if isSignedIn() && 
+        hasValidTaskData(request.resource.data) && 
+        (isAdmin() || (resource.data.userId == request.auth.uid && request.resource.data.userId == request.auth.uid));
+      allow delete: if isSignedIn() && (isAdmin() || resource.data.userId == request.auth.uid);
+    }
+  }
+}
